@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: undercover-game-server
+    name: undercover-backend
     env: node
-    buildCommand: cd server && npm install
-    startCommand: cd server && npm start
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && npm start
     envVars:
       - key: PORT
         value: 10000
