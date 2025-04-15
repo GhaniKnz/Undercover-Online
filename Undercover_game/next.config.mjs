@@ -1,17 +1,19 @@
-let userConfig = undefined
+/** @type {import('next').NextConfig} */
+
+let userConfig = {}
+
 try {
-  // try to import ESM first
+  // Essayons d'importer dynamiquement un fichier de config personnalisé (optionnel)
   userConfig = await import('./v0-user-next.config.mjs')
 } catch (e) {
   try {
-    // fallback to CJS import
-    userConfig = await import("./v0-user-next.config");
-  } catch (innerError) {
-    // ignore error
+    userConfig = await import('./v0-user-next.config.js')
+  } catch (err) {
+    // aucun fichier trouvé, on garde la config par défaut
+    userConfig = {}
   }
 }
 
-/** @type {import('next').NextConfig} */
 const nextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
@@ -27,25 +29,7 @@ const nextConfig = {
     parallelServerBuildTraces: true,
     parallelServerCompiles: true,
   },
-}
-
-if (userConfig) {
-  // ESM imports will have a "default" property
-  const config = userConfig.default || userConfig
-
-  for (const key in config) {
-    if (
-      typeof nextConfig[key] === 'object' &&
-      !Array.isArray(nextConfig[key])
-    ) {
-      nextConfig[key] = {
-        ...nextConfig[key],
-        ...config[key],
-      }
-    } else {
-      nextConfig[key] = config[key]
-    }
-  }
+  ...userConfig.default // on merge si userConfig existe
 }
 
 export default nextConfig
