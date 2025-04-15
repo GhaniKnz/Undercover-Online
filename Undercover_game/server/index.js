@@ -2,9 +2,33 @@ const express = require("express")
 const http = require("http")
 const { Server } = require("socket.io")
 const cors = require("cors")
+const path = require("path")
+
+// Charger les variables d'environnement en développement
+if (process.env.NODE_ENV !== "production") {
+  try {
+    require("dotenv").config()
+  } catch (e) {
+    console.log("dotenv n'est pas installé, les variables d'environnement doivent être définies manuellement")
+  }
+}
 
 const app = express()
 app.use(cors())
+
+// Route de base pour vérifier que le serveur fonctionne
+app.get("/", (req, res) => {
+  res.send({
+    status: "ok",
+    message: "Undercover Game Server is running",
+    timestamp: new Date().toISOString(),
+  })
+})
+
+// Route de santé pour Render
+app.get("/health", (req, res) => {
+  res.status(200).send("OK")
+})
 
 const server = http.createServer(app)
 const io = new Server(server, {
@@ -456,4 +480,13 @@ function getRandomWordPair(useCustomWords) {
 const PORT = process.env.PORT || 3001
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
+})
+
+// Gestion des erreurs non capturées
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err)
+})
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason)
 })
