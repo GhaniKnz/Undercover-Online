@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import type { Player } from "@/lib/game-logic"
 import { Badge } from "@/components/ui/badge"
+import { ROLE_DEFINITIONS } from "@/lib/game-logic"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { AlertCircle } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -47,24 +48,25 @@ export const VotePhase = ({ players, onVoteComplete, eliminatedPlayer }: VotePha
             </Alert>
 
             {eliminatedPlayer && (
-              <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-lg text-center">
-                <h3 className="font-medium mb-2">{eliminatedPlayer.name} était :</h3>
+              <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-lg text-center space-y-2">
+                <h3 className="font-medium">{eliminatedPlayer.name} était :</h3>
                 <Badge
                   variant={
-                    eliminatedPlayer.role === "civilian"
+                    eliminatedPlayer.team === "civilians"
                       ? "default"
-                      : eliminatedPlayer.role === "undercover"
+                      : eliminatedPlayer.team === "undercovers"
                         ? "destructive"
                         : "outline"
                   }
-                  className="mb-2"
+                  className="mb-1"
                 >
-                  {eliminatedPlayer.role === "civilian"
-                    ? "Civil"
-                    : eliminatedPlayer.role === "undercover"
-                      ? "Undercover"
-                      : "Mister White"}
+                  {ROLE_DEFINITIONS[eliminatedPlayer.role]?.name ?? eliminatedPlayer.role}
                 </Badge>
+                {ROLE_DEFINITIONS[eliminatedPlayer.role]?.description && (
+                  <p className="text-xs text-muted-foreground">
+                    {ROLE_DEFINITIONS[eliminatedPlayer.role]?.description}
+                  </p>
+                )}
               </div>
             )}
           </div>

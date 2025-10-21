@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -10,6 +10,9 @@ import { GamePlay } from "./game-play"
 import { Plus, Trash2, Users, ArrowLeft } from "lucide-react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Badge } from "@/components/ui/badge"
+import { OPTIONAL_ROLE_IDS, ROLE_DEFINITIONS, type PlayerRole } from "@/lib/game-logic"
 
 interface GameSetupProps {
   onBack?: () => void
@@ -19,8 +22,11 @@ export const GameSetup = ({ onBack }: GameSetupProps) => {
   const [players, setPlayers] = useState<string[]>([])
   const [newPlayer, setNewPlayer] = useState("")
   const [includeMisterWhite, setIncludeMisterWhite] = useState(false)
+  const [selectedOptionalRoles, setSelectedOptionalRoles] = useState<PlayerRole[]>([])
   const [gameStarted, setGameStarted] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const optionalRoles = useMemo(() => [...OPTIONAL_ROLE_IDS], [])
 
   const addPlayer = () => {
     if (!newPlayer.trim()) {
@@ -53,7 +59,13 @@ export const GameSetup = ({ onBack }: GameSetupProps) => {
   }
 
   if (gameStarted) {
-    return <GamePlay players={players} includeMisterWhite={includeMisterWhite} />
+    return (
+      <GamePlay
+        players={players}
+        includeMisterWhite={includeMisterWhite}
+        optionalRoles={selectedOptionalRoles}
+      />
+    )
   }
 
   return (
@@ -141,6 +153,57 @@ export const GameSetup = ({ onBack }: GameSetupProps) => {
               disabled={players.length < 3}
               className="data-[state=checked]:bg-cyan-500"
             />
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label className="flex flex-col text-cyan-200">
+                <span>Rôles optionnels</span>
+                <span className="text-sm text-cyan-400/70">
+                  Activez des variantes pour pimenter la partie
+                </span>
+              </Label>
+              <Badge variant="outline" className="text-xs text-cyan-200 border-cyan-900/60">
+                {selectedOptionalRoles.length}/{optionalRoles.length}
+              </Badge>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              {optionalRoles.map((roleId) => {
+                const role = ROLE_DEFINITIONS[roleId]
+                const checked = selectedOptionalRoles.includes(roleId)
+
+                    return (
+                      <label
+                        key={roleId}
+                        htmlFor={`role-${roleId}`}
+                        className={`flex cursor-pointer items-start gap-3 rounded-lg border border-cyan-900/40 bg-slate-800/30 p-3 transition hover:border-cyan-700/70 ${
+                          checked ? "ring-1 ring-cyan-500/60" : ""
+                        }`}
+                      >
+                        <Checkbox
+                          id={`role-${roleId}`}
+                          checked={checked}
+                          onCheckedChange={(value) => {
+                            setSelectedOptionalRoles((current) =>
+                              value === true
+                                ? [...current, roleId]
+                                : current.filter((existing) => existing !== roleId),
+                            )
+                          }}
+                          className="border-cyan-900 data-[state=checked]:bg-cyan-500"
+                        />
+                    <div className="space-y-1">
+                      <p className="font-medium text-cyan-100">{role.name}</p>
+                      <p className="text-xs text-cyan-200/70 leading-snug">{role.description}</p>
+                      {role.ability && (
+                        <p className="text-[11px] text-cyan-300/80">{role.ability}</p>
+                      )}
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
           </div>
         </CardContent>
         <CardFooter>

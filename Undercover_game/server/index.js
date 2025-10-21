@@ -55,6 +55,7 @@ io.on("connection", (socket) => {
         includeMisterWhite: false,
         useCustomWords: false,
         maxRounds: 2,
+        optionalRoles: [],
       },
     }
 
@@ -109,10 +110,16 @@ io.on("connection", (socket) => {
       return
     }
 
-    gameRooms[roomId].settings = {
+    const mergedSettings = {
       ...gameRooms[roomId].settings,
       ...settings,
     }
+
+    if (Array.isArray(settings.optionalRoles)) {
+      mergedSettings.optionalRoles = sanitizeOptionalRoles(settings.optionalRoles)
+    }
+
+    gameRooms[roomId].settings = mergedSettings
 
     io.to(roomId).emit("settings_updated", gameRooms[roomId].settings)
     callback({ success: true })
@@ -153,10 +160,16 @@ io.on("connection", (socket) => {
 
     // Initialiser l'état du jeu
     const playerNames = gameRooms[roomId].players.map((p) => p.name)
-    const { includeMisterWhite, useCustomWords, maxRounds } = gameRooms[roomId].settings
+    const { includeMisterWhite, useCustomWords, maxRounds, optionalRoles } = gameRooms[roomId].settings
 
     // Générer l'état du jeu (similaire à ta fonction generateGameData)
-    const gameState = generateGameState(playerNames, includeMisterWhite, useCustomWords, maxRounds)
+    const gameState = generateGameState(
+      playerNames,
+      includeMisterWhite,
+      useCustomWords,
+      maxRounds,
+      optionalRoles,
+    )
     gameRooms[roomId].gameState = gameState
 
     // Envoyer l'état initial à tous les joueurs
@@ -233,23 +246,53 @@ io.on("connection", (socket) => {
     // Traiter le vote (similaire à ta fonction handleVoteComplete)
     const eliminatedPlayer = gameState.players[votedPlayerId]
     gameState.players[votedPlayerId].eliminated = true
+    gameState.eliminationCount = (gameState.eliminationCount || 0) + 1
+    gameState.eliminatedPlayerId = votedPlayerId
 
-    // Vérifier si Mister White a été éliminé
-    if (eliminatedPlayer.role === "mister-white") {
+    const saboteurAlive = gameState.players.some(
+      (player) => player.role === "saboteur" && !player.eliminated,
+    )
+    const saboteurTarget = gameState.saboteurTargetRounds || SABOTEUR_DEFAULT_TARGET
+
+    if (saboteurAlive && gameState.eliminationCount >= saboteurTarget) {
+      gameState.phase = "results"
+      gameState.winner = "saboteur"
+      gameState.pendingThief = null
+    } else if (eliminatedPlayer.role === "mister-white") {
       gameState.phase = "mister-white-guess"
-      gameState.eliminatedPlayerId = votedPlayerId
+      gameState.pendingThief = null
     } else {
-      // Vérifier les conditions de victoire
-      const result = checkWinConditions(gameState)
-      if (result.gameOver) {
-        gameState.phase = "results"
-        gameState.winner = result.winner
+      const thiefIndex = gameState.players.findIndex(
+        (player) =>
+          player.role === "thief" &&
+          !player.eliminated &&
+          player.abilities &&
+          player.abilities.thiefCanSteal &&
+          !player.abilities.thiefHasStolen,
+      )
+
+      const isFirstElimination = gameState.eliminationCount === 1
+
+      if (thiefIndex !== -1 && isFirstElimination) {
+        gameState.phase = "thief-choice"
+        gameState.pendingThief = { thiefIndex, eliminatedIndex: votedPlayerId }
       } else {
-        // Continuer au prochain tour
-        gameState.phase = "turn"
-        gameState.round = 1
-        gameState.currentTurn = 0
-        gameState.turnOrder = gameState.players.map((p, i) => (p.eliminated ? -1 : i)).filter((i) => i !== -1)
+        const result = checkWinConditions(gameState)
+        if (result.gameOver) {
+          gameState.phase = "results"
+          gameState.winner = result.winner
+          gameState.pendingThief = null
+        } else {
+          gameState.phase = "turn"
+          gameState.round = 1
+          gameState.currentTurn = 0
+          gameState.turnOrder = gameState.players
+            .map((p, i) => (p.eliminated ? -1 : i))
+            .filter((i) => i !== -1)
+          gameState.pendingThief = null
+          gameState.eliminatedPlayerId = null
+          gameState.winner = null
+        }
       }
     }
 
@@ -302,6 +345,9 @@ io.on("connection", (socket) => {
         gameState.round = 1
         gameState.currentTurn = 0
         gameState.turnOrder = gameState.players.map((p, i) => (p.eliminated ? -1 : i)).filter((i) => i !== -1)
+        gameState.pendingThief = null
+        gameState.eliminatedPlayerId = null
+        gameState.winner = null
       }
     }
 
@@ -365,7 +411,12 @@ function sanitizeGameState(gameState) {
   // Supprimer les informations privées
   sanitized.players = sanitized.players.map((player) => ({
     ...player,
-    role: undefined, // Ne pas envoyer les rôles à tous les joueurs
+    role: undefined,
+    word: undefined,
+    definition: undefined,
+    abilities: undefined,
+    metadata: undefined,
+    wordType: undefined,
   }))
 
   return sanitized
@@ -373,76 +424,269 @@ function sanitizeGameState(gameState) {
 
 function getPlayerWord(gameState, playerIndex) {
   const player = gameState.players[playerIndex]
-  if (player.role === "civilian") {
-    return gameState.civilianWord.word
-  } else if (player.role === "undercover") {
-    return gameState.undercoverWord.word
-  } else {
-    return "Aucun mot"
-  }
+  if (player.word) return player.word
+  if (player.role === "mister-white") return "Aucun mot"
+  if (player.role === "thief") return "En attente"
+  return "Aucun mot"
 }
 
 function getPlayerDefinition(gameState, playerIndex) {
   const player = gameState.players[playerIndex]
-  if (player.role === "civilian") {
-    return gameState.civilianWord.definition
-  } else if (player.role === "undercover") {
-    return gameState.undercoverWord.definition
-  } else {
+  if (player.definition) return player.definition
+  if (player.role === "mister-white") {
     return "Vous devez deviner le mot des autres joueurs"
+  }
+  if (player.role === "thief") {
+    return "Volez un rôle pour découvrir votre nouveau mot."
+  }
+  return "Pas de définition disponible"
+}
+
+const OPTIONAL_ROLE_IDS = ["detective", "spy", "mute", "chameleon", "saboteur", "thief"]
+
+const ROLE_DEFINITIONS = {
+  civilian: {
+    team: "civilians",
+    wordAssignment: "civilian",
+    ability: null,
+  },
+  undercover: {
+    team: "undercovers",
+    wordAssignment: "undercover",
+    ability: null,
+  },
+  "mister-white": {
+    team: "neutral",
+    wordAssignment: "none",
+    ability: "Deviner le mot des civils pour gagner.",
+  },
+  detective: {
+    team: "civilians",
+    wordAssignment: "civilian",
+    ability: "Peut enquêter une fois par partie.",
+  },
+  spy: {
+    team: "undercovers",
+    wordAssignment: "undercover",
+    ability: "Peut envoyer un message secret à un Undercover.",
+  },
+  mute: {
+    team: "civilians",
+    wordAssignment: "civilian",
+    ability: "Ne peut communiquer que par expressions non verbales.",
+  },
+  chameleon: {
+    team: "neutral",
+    wordAssignment: "civilian",
+    ability: "Reçoit aléatoirement le mot des civils ou des Undercover.",
+  },
+  saboteur: {
+    team: "neutral",
+    wordAssignment: "unique",
+    ability: "Gagne si la partie dure suffisamment longtemps.",
+    uniqueWord: {
+      word: "???",
+      definition: "Brouillez les pistes sans révéler votre absence de mot concret.",
+    },
+    saboteurTargetRounds: 5,
+  },
+  thief: {
+    team: "neutral",
+    wordAssignment: "none",
+    ability: "Peut voler le rôle d'un joueur éliminé lors de la première manche.",
+  },
+}
+
+const SABOTEUR_DEFAULT_TARGET = ROLE_DEFINITIONS.saboteur.saboteurTargetRounds || 5
+
+function sanitizeOptionalRoles(optionalRoles = []) {
+  return Array.from(new Set(optionalRoles.filter((role) => OPTIONAL_ROLE_IDS.includes(role))))
+}
+
+function assignRoles(playerCount, includeMisterWhite, optionalRoles) {
+  const roles = []
+  const numUndercovers = Math.max(1, Math.floor(playerCount / 3))
+
+  for (let i = 0; i < numUndercovers; i++) {
+    roles.push("undercover")
+  }
+
+  if (includeMisterWhite) {
+    const undercoverIndex = roles.indexOf("undercover")
+    if (undercoverIndex !== -1) {
+      roles[undercoverIndex] = "mister-white"
+    } else {
+      roles.push("mister-white")
+    }
+  }
+
+  while (roles.length < playerCount) {
+    roles.push("civilian")
+  }
+
+  const replaceRole = (targetRole, newRole) => {
+    const index = roles.indexOf(targetRole)
+    if (index !== -1) {
+      roles[index] = newRole
+      return true
+    }
+    return false
+  }
+
+  optionalRoles.forEach((role) => {
+    switch (role) {
+      case "spy":
+        if (!replaceRole("undercover", role)) {
+          replaceRole("civilian", role)
+        }
+        break
+      case "detective":
+      case "mute":
+      case "chameleon":
+      case "saboteur":
+      case "thief":
+        replaceRole("civilian", role)
+        break
+      default:
+        break
+    }
+  })
+
+  return shuffleArray(roles)
+}
+
+function getRoleData(role, words, previousPlayer = {}) {
+  const metadata = { ...(previousPlayer.metadata || {}) }
+  const abilities = {}
+
+  let team = ROLE_DEFINITIONS[role].team
+  let wordType = "none"
+  let word
+  let definition
+
+  const setWordFromAssignment = (assignment) => {
+    if (assignment === "civilian") {
+      wordType = "civilian"
+      word = words.civilian.word
+      definition = words.civilian.definition
+    } else if (assignment === "undercover") {
+      wordType = "undercover"
+      word = words.undercover.word
+      definition = words.undercover.definition
+    } else if (assignment === "none") {
+      wordType = "none"
+      word = undefined
+      definition = undefined
+    }
+  }
+
+  switch (role) {
+    case "civilian":
+      setWordFromAssignment("civilian")
+      break
+    case "undercover":
+      setWordFromAssignment("undercover")
+      break
+    case "mister-white":
+      setWordFromAssignment("none")
+      break
+    case "detective":
+      setWordFromAssignment("civilian")
+      abilities.detectiveRevealAvailable = true
+      break
+    case "spy":
+      setWordFromAssignment("undercover")
+      abilities.spyMessageAvailable = true
+      break
+    case "mute":
+      setWordFromAssignment("civilian")
+      abilities.mute = true
+      break
+    case "chameleon": {
+      const assignedType = metadata.chameleonWordType || (Math.random() < 0.5 ? "civilian" : "undercover")
+      metadata.chameleonWordType = assignedType
+      if (assignedType === "civilian") {
+        setWordFromAssignment("civilian")
+        team = "civilians"
+      } else {
+        setWordFromAssignment("undercover")
+        team = "undercovers"
+      }
+      break
+    }
+    case "saboteur": {
+      wordType = "unique"
+      word = ROLE_DEFINITIONS.saboteur.uniqueWord?.word || "???"
+      definition =
+        ROLE_DEFINITIONS.saboteur.uniqueWord?.definition ||
+        "Brouillez les pistes et prolongez la partie aussi longtemps que possible."
+      abilities.saboteurTargetRounds =
+        previousPlayer.abilities?.saboteurTargetRounds ||
+        ROLE_DEFINITIONS.saboteur.saboteurTargetRounds ||
+        SABOTEUR_DEFAULT_TARGET
+      break
+    }
+    case "thief":
+      setWordFromAssignment("none")
+      abilities.thiefCanSteal = !previousPlayer.abilities?.thiefHasStolen
+      abilities.thiefHasStolen = previousPlayer.abilities?.thiefHasStolen || false
+      metadata.thiefOriginalRole = previousPlayer.metadata?.thiefOriginalRole || "thief"
+      break
+    default:
+      setWordFromAssignment(ROLE_DEFINITIONS[role].wordAssignment)
+      break
+  }
+
+  return { team, wordType, word, definition, abilities, metadata }
+}
+
+function buildPlayer(name, role, words) {
+  const roleData = getRoleData(role, words)
+  return {
+    name,
+    role,
+    eliminated: false,
+    clues: [],
+    wordType: roleData.wordType,
+    word: roleData.word,
+    definition: roleData.definition,
+    team: roleData.team,
+    abilities: roleData.abilities,
+    metadata: roleData.metadata,
   }
 }
 
 function checkWinConditions(gameState) {
   const activePlayers = gameState.players.filter((p) => !p.eliminated)
-  const activeCivilians = activePlayers.filter((p) => p.role === "civilian")
-  const activeUndercovers = activePlayers.filter((p) => p.role === "undercover")
+  const activeCivilians = activePlayers.filter((p) => p.team === "civilians")
+  const activeUndercovers = activePlayers.filter((p) => p.team === "undercovers")
   const activeMisterWhite = activePlayers.filter((p) => p.role === "mister-white")
+  const saboteurAlive = activePlayers.some((p) => p.role === "saboteur")
+
+  if (saboteurAlive && gameState.eliminationCount >= gameState.saboteurTargetRounds) {
+    return { gameOver: true, winner: "saboteur" }
+  }
+
+  if (activePlayers.length === activeMisterWhite.length && activeMisterWhite.length > 0) {
+    return { gameOver: true, winner: "mister-white" }
+  }
 
   if (activeUndercovers.length === 0 && activeMisterWhite.length === 0) {
     return { gameOver: true, winner: "civilians" }
-  } else if (activeUndercovers.length >= activeCivilians.length) {
+  }
+
+  if (activeCivilians.length === 0 || activeUndercovers.length >= activeCivilians.length) {
     return { gameOver: true, winner: "undercovers" }
   }
 
   return { gameOver: false }
 }
 
-function generateGameState(playerNames, includeMisterWhite, useCustomWords, maxRounds) {
-  // Similaire à ta fonction generateGameData
-  // Mais adaptée pour le serveur
-
-  // Code simplifié pour l'exemple
-  const players = playerNames.map((name) => ({
-    name,
-    role: "civilian", // Sera mis à jour
-    eliminated: false,
-    clues: [],
-  }))
-
-  // Assigner les rôles
-  const numUndercovers = Math.max(1, Math.floor(players.length / 3))
-  const shuffledIndices = shuffleArray([...Array(players.length).keys()])
-
-  let misterWhiteAssigned = false
-
-  for (let i = 0; i < shuffledIndices.length; i++) {
-    const playerIndex = shuffledIndices[i]
-
-    if (i < numUndercovers) {
-      if (includeMisterWhite && !misterWhiteAssigned) {
-        players[playerIndex].role = "mister-white"
-        misterWhiteAssigned = true
-      } else {
-        players[playerIndex].role = "undercover"
-      }
-    } else {
-      players[playerIndex].role = "civilian"
-    }
-  }
-
-  // Sélectionner une paire de mots
+function generateGameState(playerNames, includeMisterWhite, useCustomWords, maxRounds, optionalRoles = []) {
+  const sanitizedOptionalRoles = sanitizeOptionalRoles(optionalRoles)
   const wordPair = getRandomWordPair(useCustomWords)
+  const roles = assignRoles(playerNames.length, includeMisterWhite, sanitizedOptionalRoles)
+  const players = roles.map((role, index) => buildPlayer(playerNames[index], role, wordPair))
 
   return {
     players,
@@ -453,6 +697,16 @@ function generateGameState(playerNames, includeMisterWhite, useCustomWords, maxR
     currentTurn: 0,
     turnOrder: [...Array(players.length).keys()],
     maxRounds,
+    optionalRoles: sanitizedOptionalRoles,
+    secretMessages: [],
+    investigations: [],
+    nextMessageId: 1,
+    eliminationCount: 0,
+    saboteurTargetRounds: ROLE_DEFINITIONS.saboteur.saboteurTargetRounds || SABOTEUR_DEFAULT_TARGET,
+    pendingThief: null,
+    usedWords: [wordPair.civilian.word, wordPair.undercover.word],
+    winner: null,
+    eliminatedPlayerId: null,
   }
 }
 
