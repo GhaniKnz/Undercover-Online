@@ -10,6 +10,9 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { useSocket } from "@/hooks/use-socket"
 import { OnlineGamePlay } from "./online-game-play"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Badge } from "@/components/ui/badge"
+import { OPTIONAL_ROLE_IDS, ROLE_DEFINITIONS, type PlayerRole } from "@/lib/game-logic"
 
 interface LobbyProps {
   roomId: string
@@ -28,6 +31,7 @@ interface GameSettings {
   includeMisterWhite: boolean
   useCustomWords: boolean
   maxRounds: number
+  optionalRoles: PlayerRole[]
 }
 
 export const Lobby = ({ roomId, isHost, onBack }: LobbyProps) => {
@@ -36,6 +40,7 @@ export const Lobby = ({ roomId, isHost, onBack }: LobbyProps) => {
     includeMisterWhite: false,
     useCustomWords: false,
     maxRounds: 2,
+    optionalRoles: [],
   })
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -52,7 +57,7 @@ export const Lobby = ({ roomId, isHost, onBack }: LobbyProps) => {
 
     // Écouter les mises à jour des paramètres
     socket.on("settings_updated", (updatedSettings: GameSettings) => {
-      setSettings(updatedSettings)
+      setSettings({ ...updatedSettings, optionalRoles: updatedSettings.optionalRoles || [] })
     })
 
     // Écouter le démarrage du jeu
@@ -255,6 +260,51 @@ export const Lobby = ({ roomId, isHost, onBack }: LobbyProps) => {
                   ))}
                 </div>
               </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="flex flex-col text-cyan-200">
+                    <span>Rôles optionnels</span>
+                    <span className="text-sm text-cyan-400/70">
+                      Activez des variantes pour pimenter la partie
+                    </span>
+                  </Label>
+                  <Badge variant="outline" className="text-xs text-cyan-200 border-cyan-900/60">
+                    {settings.optionalRoles.length}/{OPTIONAL_ROLE_IDS.length}
+                  </Badge>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {OPTIONAL_ROLE_IDS.map((roleId) => {
+                    const role = ROLE_DEFINITIONS[roleId]
+                    const checked = settings.optionalRoles.includes(roleId)
+
+                    return (
+                      <label
+                        key={roleId}
+                        htmlFor={`role-${roleId}`}
+                        className={`flex cursor-pointer items-start gap-3 rounded-lg border border-cyan-900/40 bg-slate-800/30 p-3 transition hover:border-cyan-700/70 ${
+                          checked ? "ring-1 ring-cyan-500/60" : ""
+                        }`}
+                      >
+                        <Checkbox
+                          id={`role-${roleId}`}
+                          checked={checked}
+                          onCheckedChange={(value) =>
+                            handleToggleRole(roleId, value === true)}
+                          className="border-cyan-900 data-[state=checked]:bg-cyan-500"
+                        />
+                        <div className="space-y-1">
+                          <p className="font-medium text-cyan-100">{role.name}</p>
+                          <p className="text-xs text-cyan-200/70 leading-snug">{role.description}</p>
+                          {role.ability && (
+                            <p className="text-[11px] text-cyan-300/80">{role.ability}</p>
+                          )}
+                        </div>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
             </div>
           )}
         </CardContent>
@@ -281,3 +331,24 @@ export const Lobby = ({ roomId, isHost, onBack }: LobbyProps) => {
     </div>
   )
 }
+  const handleToggleRole = (roleId: PlayerRole, checked: boolean) => {
+    if (!isHost) return
+
+    const updatedRoles = checked
+      ? Array.from(new Set([...settings.optionalRoles, roleId]))
+      : settings.optionalRoles.filter((role) => role !== roleId)
+
+    const newSettings = { ...settings, optionalRoles: updatedRoles }
+    setSettings(newSettings)
+
+    socket.emit(
+      "update_settings",
+      { roomId, settings: { optionalRoles: updatedRoles } },
+      (response: any) => {
+        if (!response.success) {
+          setError(response.message || "Erreur lors de la mise à jour des rôles")
+        }
+      },
+    )
+  }
+

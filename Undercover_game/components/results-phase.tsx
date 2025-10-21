@@ -4,10 +4,11 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import type { Player } from "@/lib/game-logic"
 import { Badge } from "@/components/ui/badge"
+import { ROLE_DEFINITIONS } from "@/lib/game-logic"
 import { ScrollArea } from "@/components/ui/scroll-area"
 
 interface ResultsPhaseProps {
-  winner: "civilians" | "undercovers" | "mister-white" | null
+  winner: "civilians" | "undercovers" | "mister-white" | "saboteur" | null
   players: Player[]
   civilianWord: { word: string; definition: string }
   undercoverWord: { word: string; definition: string }
@@ -25,9 +26,23 @@ export const ResultsPhase = ({ winner, players, civilianWord, undercoverWord, on
         return "Les Undercover ont gagné !"
       case "mister-white":
         return "Le Mister White a gagné !"
+      case "saboteur":
+        return "Le Saboteur a triomphé !"
       default:
         return "Partie terminée"
     }
+  }
+
+  const getRoleDisplay = (player: Player) => {
+    const currentLabel = ROLE_DEFINITIONS[player.role]?.name ?? player.role
+    const originalRole = player.metadata.thiefOriginalRole
+
+    if (originalRole && originalRole !== player.role) {
+      const originalLabel = ROLE_DEFINITIONS[originalRole]?.name ?? originalRole
+      return `${originalLabel} → ${currentLabel}`
+    }
+
+    return currentLabel
   }
 
   return (
@@ -63,14 +78,14 @@ export const ResultsPhase = ({ winner, players, civilianWord, undercoverWord, on
                   <span>{player.name}</span>
                   <Badge
                     variant={
-                      player.role === "civilian" ? "default" : player.role === "undercover" ? "destructive" : "outline"
+                      player.team === "civilians"
+                        ? "default"
+                        : player.team === "undercovers"
+                          ? "destructive"
+                          : "outline"
                     }
                   >
-                    {player.role === "civilian"
-                      ? "Civil"
-                      : player.role === "undercover"
-                        ? "Undercover"
-                        : "Mister White"}
+                    {getRoleDisplay(player)}
                   </Badge>
                 </div>
               ))}

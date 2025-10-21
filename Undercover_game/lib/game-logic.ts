@@ -1,13 +1,54 @@
-// Types
-type GamePhase = "setup" | "turn" | "vote" | "mister-white-guess" | "results"
+import { OPTIONAL_ROLE_IDS, ROLE_DEFINITIONS } from "./roles"
+import type { PlayerRole, RoleTeam, WordAssignment } from "./roles"
 
-type PlayerRole = "civilian" | "undercover" | "mister-white"
+type GamePhase = "setup" | "turn" | "vote" | "mister-white-guess" | "thief-choice" | "results"
+
+type PlayerWordType = "civilian" | "undercover" | "none" | "unique"
+
+interface PlayerMetadata {
+  chameleonWordType?: PlayerWordType
+  thiefOriginalRole?: PlayerRole
+}
+
+interface PlayerAbilities {
+  detectiveRevealAvailable?: boolean
+  spyMessageAvailable?: boolean
+  mute?: boolean
+  thiefCanSteal?: boolean
+  thiefHasStolen?: boolean
+  saboteurTargetRounds?: number
+}
+
+interface SecretMessage {
+  id: number
+  from: number
+  to: number
+  message: string
+  delivered: boolean
+}
+
+interface InvestigationRecord {
+  investigator: number
+  target: number
+  role: PlayerRole
+}
+
+interface PendingThiefState {
+  thiefIndex: number
+  eliminatedIndex: number
+}
 
 interface Player {
   name: string
   role: PlayerRole
   eliminated: boolean
   clues: string[]
+  wordType: PlayerWordType
+  word?: string
+  definition?: string
+  team: RoleTeam
+  abilities: PlayerAbilities
+  metadata: PlayerMetadata
 }
 
 interface GameState {
@@ -19,8 +60,24 @@ interface GameState {
   currentTurn: number
   turnOrder: number[]
   usedWords: string[]
-  maxRounds: number // Nombre maximum de tours d'indices
+  maxRounds: number
+  optionalRoles: PlayerRole[]
+  secretMessages: SecretMessage[]
+  investigations: InvestigationRecord[]
+  nextMessageId: number
+  eliminationCount: number
+  saboteurTargetRounds: number
+  pendingThief: PendingThiefState | null
 }
+
+interface GenerateGameOptions {
+  includeMisterWhite?: boolean
+  optionalRoles?: PlayerRole[]
+  useCustomWords?: boolean
+  maxRounds?: number
+}
+
+const SABOTEUR_DEFAULT_TARGET = ROLE_DEFINITIONS.saboteur.saboteurTargetRounds ?? 5
 
 // Word pairs for the game (civilian word, undercover word)
 const wordPairs = [
@@ -133,57 +190,232 @@ function shuffleArray<T>(array: T[]): T[] {
   return newArray
 }
 
-const generateGameData = (
-  playerNames: string[],
-  includeMisterWhite: boolean,
-  useCustomWords = false,
-  maxRounds = 2, // Par défaut, 2 tours d'indices
-): GameState => {
-  // Get a random word pair
-  const { civilian, undercover } = getRandomWordPair([], useCustomWords)
+interface RoleData {
+  team: RoleTeam
+  wordType: PlayerWordType
+  word?: string
+  definition?: string
+  abilities: PlayerAbilities
+  metadata: PlayerMetadata
+}
 
-  // Create players with roles
-  const players: Player[] = playerNames.map((name) => ({
-    name,
-    role: "civilian", // Default role, will be updated
-    eliminated: false,
-    clues: [],
-  }))
+interface RoleDataOptions {
+  previousPlayer?: Player
+}
 
-  // Shuffle players to randomize roles
-  const shuffledPlayers = shuffleArray(players)
+const getRoleData = (
+  role: PlayerRole,
+  words: { civilian: { word: string; definition: string }; undercover: { word: string; definition: string } },
+  options: RoleDataOptions = {},
+): RoleData => {
+  const { previousPlayer } = options
+  const metadata: PlayerMetadata = { ...previousPlayer?.metadata }
+  const abilities: PlayerAbilities = {}
 
-  // Determine number of undercovers (about 1/3 of players, at least 1)
-  const numUndercovers = Math.max(1, Math.floor(players.length / 3))
+  let team: RoleTeam = ROLE_DEFINITIONS[role].team
+  let wordType: PlayerWordType = "none"
+  let word: string | undefined
+  let definition: string | undefined
 
-  // Assign roles
-  let misterWhiteAssigned = false
-
-  for (let i = 0; i < shuffledPlayers.length; i++) {
-    if (i < numUndercovers) {
-      // If Mister White is enabled and not yet assigned, assign it to the first undercover
-      if (includeMisterWhite && !misterWhiteAssigned) {
-        shuffledPlayers[i].role = "mister-white"
-        misterWhiteAssigned = true
-      } else {
-        shuffledPlayers[i].role = "undercover"
-      }
-    } else {
-      shuffledPlayers[i].role = "civilian"
+  const setWordFromAssignment = (assignment: WordAssignment) => {
+    if (assignment === "civilian") {
+      wordType = "civilian"
+      word = words.civilian.word
+      definition = words.civilian.definition
+    } else if (assignment === "undercover") {
+      wordType = "undercover"
+      word = words.undercover.word
+      definition = words.undercover.definition
+    } else if (assignment === "none") {
+      wordType = "none"
+      word = undefined
+      definition = undefined
     }
   }
 
-  // Return the game state
+  switch (role) {
+    case "civilian":
+      setWordFromAssignment("civilian")
+      break
+    case "undercover":
+      setWordFromAssignment("undercover")
+      break
+    case "mister-white":
+      setWordFromAssignment("none")
+      break
+    case "detective":
+      setWordFromAssignment("civilian")
+      abilities.detectiveRevealAvailable = true
+      break
+    case "spy":
+      setWordFromAssignment("undercover")
+      abilities.spyMessageAvailable = true
+      break
+    case "mute":
+      setWordFromAssignment("civilian")
+      abilities.mute = true
+      break
+    case "chameleon": {
+      const previousType = previousPlayer?.metadata?.chameleonWordType
+      const assignedType: PlayerWordType =
+        previousType ?? (Math.random() < 0.5 ? "civilian" : "undercover")
+      metadata.chameleonWordType = assignedType
+      if (assignedType === "civilian") {
+        setWordFromAssignment("civilian")
+        team = "civilians"
+      } else {
+        setWordFromAssignment("undercover")
+        team = "undercovers"
+      }
+      break
+    }
+    case "saboteur": {
+      const saboteurInfo = ROLE_DEFINITIONS.saboteur.uniqueWord ?? {
+        word: "Saboteur",
+        definition: "Semer le doute et prolonger la partie aussi longtemps que possible.",
+      }
+      wordType = "unique"
+      word = saboteurInfo.word
+      definition = saboteurInfo.definition
+      abilities.saboteurTargetRounds =
+        previousPlayer?.abilities?.saboteurTargetRounds ??
+        ROLE_DEFINITIONS.saboteur.saboteurTargetRounds ??
+        SABOTEUR_DEFAULT_TARGET
+      break
+    }
+    case "thief":
+      setWordFromAssignment("none")
+      abilities.thiefCanSteal = !previousPlayer?.abilities?.thiefHasStolen
+      abilities.thiefHasStolen = previousPlayer?.abilities?.thiefHasStolen ?? false
+      metadata.thiefOriginalRole = previousPlayer?.metadata?.thiefOriginalRole ?? "thief"
+      break
+    default:
+      setWordFromAssignment(ROLE_DEFINITIONS[role].wordAssignment)
+      break
+  }
+
+  return { team, wordType, word, definition, abilities, metadata }
+}
+
+const buildPlayer = (
+  name: string,
+  role: PlayerRole,
+  words: { civilian: { word: string; definition: string }; undercover: { word: string; definition: string } },
+): Player => {
+  const roleData = getRoleData(role, words)
+
   return {
-    players: shuffledPlayers,
-    civilianWord: civilian,
-    undercoverWord: undercover,
+    name,
+    role,
+    eliminated: false,
+    clues: [],
+    wordType: roleData.wordType,
+    word: roleData.word,
+    definition: roleData.definition,
+    team: roleData.team,
+    abilities: roleData.abilities,
+    metadata: roleData.metadata,
+  }
+}
+
+const sanitizeOptionalRoles = (optionalRoles: PlayerRole[] = []) => {
+  const filtered = optionalRoles.filter((role) => OPTIONAL_ROLE_IDS.includes(role))
+  return Array.from(new Set(filtered))
+}
+
+const assignRoles = (
+  playerCount: number,
+  includeMisterWhite: boolean,
+  optionalRoles: PlayerRole[],
+): PlayerRole[] => {
+  const roles: PlayerRole[] = []
+  const numUndercovers = Math.max(1, Math.floor(playerCount / 3))
+
+  for (let i = 0; i < numUndercovers; i += 1) {
+    roles.push("undercover")
+  }
+
+  if (includeMisterWhite) {
+    const undercoverIndex = roles.findIndex((role) => role === "undercover")
+    if (undercoverIndex !== -1) {
+      roles[undercoverIndex] = "mister-white"
+    } else {
+      roles.push("mister-white")
+    }
+  }
+
+  while (roles.length < playerCount) {
+    roles.push("civilian")
+  }
+
+  const replaceRole = (targetRole: PlayerRole, newRole: PlayerRole) => {
+    const index = roles.findIndex((role) => role === targetRole)
+    if (index !== -1) {
+      roles[index] = newRole
+      return true
+    }
+    return false
+  }
+
+  optionalRoles.forEach((role) => {
+    switch (role) {
+      case "spy":
+        if (!replaceRole("undercover", role)) {
+          replaceRole("civilian", role)
+        }
+        break
+      case "detective":
+      case "mute":
+      case "chameleon":
+      case "saboteur":
+      case "thief":
+        replaceRole("civilian", role)
+        break
+      default:
+        break
+    }
+  })
+
+  return shuffleArray(roles)
+}
+
+const generateGameData = (
+  playerNames: string[],
+  options: GenerateGameOptions = {},
+): GameState => {
+  const { includeMisterWhite = false, optionalRoles = [], useCustomWords = false, maxRounds = 2 } = options
+
+  const sanitizedOptionalRoles = sanitizeOptionalRoles(optionalRoles)
+  const wordPair = getRandomWordPair([], useCustomWords)
+  const roles = assignRoles(playerNames.length, includeMisterWhite, sanitizedOptionalRoles)
+
+  const players = roles.map((role, index) => buildPlayer(playerNames[index], role, wordPair))
+
+  const usedWords = [wordPair.civilian.word, wordPair.undercover.word]
+  if (sanitizedOptionalRoles.includes("saboteur")) {
+    const saboteurWord = ROLE_DEFINITIONS.saboteur.uniqueWord?.word
+    if (saboteurWord) {
+      usedWords.push(saboteurWord)
+    }
+  }
+
+  return {
+    players,
+    civilianWord: wordPair.civilian,
+    undercoverWord: wordPair.undercover,
     phase: "setup",
     round: 1,
     currentTurn: 0,
-    turnOrder: [],
-    usedWords: [civilian.word, undercover.word],
-    maxRounds: maxRounds,
+    turnOrder: [...Array(players.length).keys()],
+    usedWords,
+    maxRounds,
+    optionalRoles: sanitizedOptionalRoles,
+    secretMessages: [],
+    investigations: [],
+    nextMessageId: 1,
+    eliminationCount: 0,
+    saboteurTargetRounds: ROLE_DEFINITIONS.saboteur.saboteurTargetRounds ?? SABOTEUR_DEFAULT_TARGET,
+    pendingThief: null,
   }
 }
 
@@ -191,11 +423,27 @@ const generateGameData = (
 const gameLogic = {
   generateGameData,
   generateSimilarWords,
-  // Ajouter d'autres fonctions si nécessaire
+  getRoleData,
 }
 
 // Export des types pour TypeScript
-export type { GamePhase, PlayerRole, Player, GameState }
+export type {
+  GamePhase,
+  PlayerWordType,
+  PlayerMetadata,
+  PlayerAbilities,
+  SecretMessage,
+  InvestigationRecord,
+  PendingThiefState,
+  Player,
+  GameState,
+  GenerateGameOptions,
+}
+
+export { ROLE_DEFINITIONS, OPTIONAL_ROLE_IDS }
+
+export type { PlayerRole } from "./roles"
 
 // Export par défaut de l'objet gameLogic
 export default gameLogic
+

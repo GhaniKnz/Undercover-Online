@@ -1,51 +1,109 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import gameLogic from "@/lib/game-logic"
-import type { GameState, Player } from "@/lib/game-logic"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import gameLogic, {
+  type GameState,
+  type InvestigationRecord,
+  type Player,
+  type PlayerRole,
+  type SecretMessage,
+} from "@/lib/game-logic"
 import { WordReveal } from "./word-reveal"
 import { TurnPhase } from "./turn-phase"
 import { VotePhase } from "./vote-phase"
 import { ResultsPhase } from "./results-phase"
 import { MisterWhiteGuess } from "./mister-white-guess"
+import { ThiefPhase } from "./thief-phase"
+
+type Winner = "civilians" | "undercovers" | "mister-white" | "saboteur" | null
 
 interface GamePlayProps {
   players: string[]
   includeMisterWhite: boolean
+  optionalRoles?: PlayerRole[]
   useCustomWords?: boolean
   maxRounds?: number
 }
 
-export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, maxRounds = 2 }: GamePlayProps) => {
+const getActivePlayers = (players: Player[]) => players.filter((player) => !player.eliminated)
+
+const determineWinner = (players: Player[]): Winner => {
+  const activePlayers = getActivePlayers(players)
+
+  if (activePlayers.length === 0) {
+    return null
+  }
+
+  const civilians = activePlayers.filter((player) => player.team === "civilians")
+  const undercovers = activePlayers.filter((player) => player.team === "undercovers")
+  const misterWhite = activePlayers.filter((player) => player.role === "mister-white")
+
+  if (activePlayers.length === misterWhite.length && misterWhite.length > 0) {
+    return "mister-white"
+  }
+
+  if (undercovers.length === 0 && misterWhite.length === 0) {
+    return "civilians"
+  }
+
+  if (civilians.length === 0 || undercovers.length >= civilians.length) {
+    return "undercovers"
+  }
+
+  return null
+}
+
+export const GamePlay = ({
+  players,
+  includeMisterWhite,
+  optionalRoles = [],
+  useCustomWords = false,
+  maxRounds = 2,
+}: GamePlayProps) => {
   const [gameState, setGameState] = useState<GameState | null>(null)
   const [currentPlayerIndex, setCurrentPlayerIndex] = useState(0)
   const [showWord, setShowWord] = useState(false)
   const [eliminatedPlayer, setEliminatedPlayer] = useState<Player | null>(null)
-  const [misterWhiteGuessing, setMisterWhiteGuessing] = useState(false)
   const [gameOver, setGameOver] = useState(false)
-  const [winner, setWinner] = useState<"civilians" | "undercovers" | "mister-white" | null>(null)
+  const [winner, setWinner] = useState<Winner>(null)
 
   useEffect(() => {
-    // Initialize game state
-    const initialGameState = gameLogic.generateGameData(players, includeMisterWhite, useCustomWords, maxRounds)
+    const initialGameState = gameLogic.generateGameData(players, {
+      includeMisterWhite,
+      optionalRoles,
+      useCustomWords,
+      maxRounds,
+    })
+
     setGameState(initialGameState)
-  }, [players, includeMisterWhite, useCustomWords, maxRounds])
+    setCurrentPlayerIndex(0)
+    setShowWord(false)
+    setEliminatedPlayer(null)
+    setGameOver(false)
+    setWinner(null)
+  }, [players, includeMisterWhite, optionalRoles, useCustomWords, maxRounds])
 
   const handleNextPlayer = () => {
     if (!gameState) return
 
     if (currentPlayerIndex < gameState.players.length - 1) {
-      setCurrentPlayerIndex(currentPlayerIndex + 1)
+      setCurrentPlayerIndex((index) => index + 1)
       setShowWord(false)
     } else {
-      // All players have seen their roles, move to the first turn
       setGameState({
         ...gameState,
         phase: "turn",
         currentTurn: 0,
-        turnOrder: [...Array(gameState.players.length).keys()].filter((i) => !gameState.players[i].eliminated),
+        turnOrder: gameState.players.map((_, index) => index),
       })
     }
   }
@@ -57,129 +115,289 @@ export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, 
   const handleClueSubmitted = (clue: string) => {
     if (!gameState) return
 
-    const updatedPlayers = [...gameState.players]
-    updatedPlayers[gameState.turnOrder[gameState.currentTurn]].clues.push(clue)
+    const turnPlayerIndex = gameState.turnOrder[gameState.currentTurn]
+    const updatedPlayers = gameState.players.map((player, index) =>
+      index === turnPlayerIndex ? { ...player, clues: [...player.clues, clue] } : player,
+    )
 
     if (gameState.currentTurn < gameState.turnOrder.length - 1) {
-      // Move to next player's turn
       setGameState({
         ...gameState,
         players: updatedPlayers,
         currentTurn: gameState.currentTurn + 1,
       })
+    } else if (gameState.round >= gameState.maxRounds) {
+      setGameState({
+        ...gameState,
+        players: updatedPlayers,
+        phase: "vote",
+      })
     } else {
-      // All players have given clues for this round
-      // Check if we've reached the maximum number of rounds
-      if (gameState.round >= gameState.maxRounds) {
-        // Move to voting phase if we've completed all rounds
-        setGameState({
-          ...gameState,
-          players: updatedPlayers,
-          phase: "vote",
-        })
-      } else {
-        // Start a new round of clues
-        setGameState({
-          ...gameState,
-          players: updatedPlayers,
-          round: gameState.round + 1,
-          currentTurn: 0,
-        })
-      }
+      setGameState({
+        ...gameState,
+        players: updatedPlayers,
+        round: gameState.round + 1,
+        currentTurn: 0,
+      })
     }
+  }
+
+  const handleAcknowledgeMessages = (playerIndex: number) => {
+    if (!gameState) return
+    if (!gameState.secretMessages.some((message) => message.to === playerIndex && !message.delivered)) return
+
+    const updatedMessages = gameState.secretMessages.map((message) =>
+      message.to === playerIndex ? { ...message, delivered: true } : message,
+    )
+
+    setGameState({
+      ...gameState,
+      secretMessages: updatedMessages,
+    })
+  }
+
+  const handleDetectiveReveal = (investigatorIndex: number, targetIndex: number): PlayerRole | null => {
+    if (!gameState) return null
+
+    const investigator = gameState.players[investigatorIndex]
+    if (!investigator.abilities.detectiveRevealAvailable) {
+      return null
+    }
+
+    const updatedPlayers = gameState.players.map((player, index) =>
+      index === investigatorIndex
+        ? {
+            ...player,
+            abilities: { ...player.abilities, detectiveRevealAvailable: false },
+          }
+        : player,
+    )
+
+    const revealedRole = gameState.players[targetIndex].role
+
+    const updatedInvestigations: InvestigationRecord[] = [
+      ...gameState.investigations,
+      { investigator: investigatorIndex, target: targetIndex, role: revealedRole },
+    ]
+
+    setGameState({
+      ...gameState,
+      players: updatedPlayers,
+      investigations: updatedInvestigations,
+    })
+
+    return revealedRole
+  }
+
+  const handleSpyMessage = (fromIndex: number, toIndex: number, message: string) => {
+    if (!gameState || !message.trim()) return false
+
+    const spy = gameState.players[fromIndex]
+    if (!spy.abilities.spyMessageAvailable) {
+      return false
+    }
+
+    const updatedPlayers = gameState.players.map((player, index) =>
+      index === fromIndex
+        ? {
+            ...player,
+            abilities: { ...player.abilities, spyMessageAvailable: false },
+          }
+        : player,
+    )
+
+    const newMessage: SecretMessage = {
+      id: gameState.nextMessageId,
+      from: fromIndex,
+      to: toIndex,
+      message: message.trim(),
+      delivered: false,
+    }
+
+    setGameState({
+      ...gameState,
+      players: updatedPlayers,
+      secretMessages: [...gameState.secretMessages, newMessage],
+      nextMessageId: gameState.nextMessageId + 1,
+    })
+
+    return true
+  }
+
+  const finalizeElimination = (state: GameState) => {
+    const activePlayers = getActivePlayers(state.players)
+    const saboteurAlive = activePlayers.some((player) => player.role === "saboteur")
+
+    if (saboteurAlive && state.eliminationCount >= state.saboteurTargetRounds) {
+      setWinner("saboteur")
+      setGameOver(true)
+      setGameState({ ...state, phase: "results" })
+      return
+    }
+
+    const computedWinner = determineWinner(state.players)
+    if (computedWinner) {
+      setWinner(computedWinner)
+      setGameOver(true)
+      setGameState({ ...state, phase: "results" })
+      return
+    }
+
+    setGameState({
+      ...state,
+      phase: "turn",
+      currentTurn: 0,
+      turnOrder: activePlayers.map((player) => state.players.indexOf(player)),
+      round: 1,
+      pendingThief: null,
+    })
   }
 
   const handleVoteComplete = (votedPlayerId: number) => {
     if (!gameState) return
 
-    const eliminatedPlayer = gameState.players[votedPlayerId]
-    setEliminatedPlayer(eliminatedPlayer)
-
-    // Remove player from active players
+    const eliminated = gameState.players[votedPlayerId]
     const updatedPlayers = gameState.players.map((player, index) =>
       index === votedPlayerId ? { ...player, eliminated: true } : player,
     )
 
-    // Check if Mister White was eliminated
-    if (eliminatedPlayer.role === "mister-white") {
-      setMisterWhiteGuessing(true)
+    const updatedState: GameState = {
+      ...gameState,
+      players: updatedPlayers,
+      eliminationCount: gameState.eliminationCount + 1,
+    }
+
+    setEliminatedPlayer(updatedPlayers[votedPlayerId])
+
+    const saboteurAlive = updatedPlayers.some((player) => player.role === "saboteur" && !player.eliminated)
+    if (saboteurAlive && updatedState.eliminationCount >= updatedState.saboteurTargetRounds) {
+      setWinner("saboteur")
+      setGameOver(true)
+      setGameState({ ...updatedState, phase: "results" })
+      return
+    }
+
+    if (eliminated.role === "mister-white") {
+      setGameState({ ...updatedState, phase: "mister-white-guess" })
+      return
+    }
+
+    const thiefIndex = updatedPlayers.findIndex(
+      (player) =>
+        player.role === "thief" &&
+        !player.eliminated &&
+        player.abilities.thiefCanSteal &&
+        !player.abilities.thiefHasStolen,
+    )
+
+    if (thiefIndex !== -1 && gameState.eliminationCount === 0) {
       setGameState({
-        ...gameState,
-        players: updatedPlayers,
-        phase: "mister-white-guess",
+        ...updatedState,
+        phase: "thief-choice",
+        pendingThief: { thiefIndex, eliminatedIndex: votedPlayerId },
       })
       return
     }
 
-    // Check win conditions
-    const activePlayers = updatedPlayers.filter((p) => !p.eliminated)
-    const activeCivilians = activePlayers.filter((p) => p.role === "civilian")
-    const activeUndercovers = activePlayers.filter((p) => p.role === "undercover")
-    const activeMisterWhite = activePlayers.filter((p) => p.role === "mister-white")
+    finalizeElimination({ ...updatedState, pendingThief: null })
+  }
 
-    if (activeUndercovers.length === 0 && activeMisterWhite.length === 0) {
-      // Civilians win
-      setWinner("civilians")
-      setGameOver(true)
-    } else if (activeUndercovers.length >= activeCivilians.length) {
-      // Undercovers win
-      setWinner("undercovers")
-      setGameOver(true)
-    } else {
-      // Continue to next round
-      setGameState({
-        ...gameState,
-        players: updatedPlayers,
-        phase: "turn",
-        currentTurn: 0,
-        turnOrder: activePlayers.map((p) => gameState.players.indexOf(p)),
-        round: 1, // Reset round counter for new set of clues
-      })
+  const handleThiefDecision = (shouldSteal: boolean) => {
+    if (!gameState || !gameState.pendingThief) return
+
+    const { thiefIndex, eliminatedIndex } = gameState.pendingThief
+    const eliminated = gameState.players[eliminatedIndex]
+
+    const updatedPlayers = gameState.players.map((player, index) => {
+      if (index !== thiefIndex) {
+        return player
+      }
+
+      if (!shouldSteal) {
+        return {
+          ...player,
+          abilities: { ...player.abilities, thiefCanSteal: false, thiefHasStolen: false },
+          metadata: {
+            ...player.metadata,
+            thiefOriginalRole: player.metadata.thiefOriginalRole ?? "thief",
+          },
+        }
+      }
+
+      const roleData = gameLogic.getRoleData(eliminated.role, {
+        civilian: gameState.civilianWord,
+        undercover: gameState.undercoverWord,
+      }, { previousPlayer: player })
+
+      return {
+        ...player,
+        role: eliminated.role,
+        team: roleData.team,
+        wordType: roleData.wordType,
+        word: roleData.word,
+        definition: roleData.definition,
+        abilities: {
+          ...roleData.abilities,
+          thiefHasStolen: true,
+          thiefCanSteal: false,
+        },
+        metadata: {
+          ...player.metadata,
+          ...roleData.metadata,
+          thiefOriginalRole: player.metadata.thiefOriginalRole ?? "thief",
+        },
+      }
+    })
+
+    const updatedState: GameState = {
+      ...gameState,
+      players: updatedPlayers,
+      pendingThief: null,
     }
+
+    finalizeElimination(updatedState)
   }
 
   const handleMisterWhiteGuess = (guess: string, correct: boolean) => {
     if (!gameState) return
 
     if (correct) {
-      // Mister White wins
       setWinner("mister-white")
-    } else {
-      // Check remaining win conditions
-      const activePlayers = gameState.players.filter((p) => !p.eliminated)
-      const activeCivilians = activePlayers.filter((p) => p.role === "civilian")
-      const activeUndercovers = activePlayers.filter((p) => p.role === "undercover")
-
-      if (activeUndercovers.length === 0) {
-        // Civilians win
-        setWinner("civilians")
-      } else if (activeUndercovers.length >= activeCivilians.length) {
-        // Undercovers win
-        setWinner("undercovers")
-      } else {
-        // Continue to next round
-        setGameState({
-          ...gameState,
-          phase: "turn",
-          currentTurn: 0,
-          turnOrder: activePlayers.map((p) => gameState.players.indexOf(p)),
-          round: 1, // Reset round counter for new set of clues
-        })
-        setMisterWhiteGuessing(false)
-        return
-      }
+      setGameOver(true)
+      setGameState({ ...gameState, phase: "results" })
+      return
     }
 
-    setGameOver(true)
+    const updatedState: GameState = {
+      ...gameState,
+      phase: "turn",
+      currentTurn: 0,
+      turnOrder: getActivePlayers(gameState.players).map((player) => gameState.players.indexOf(player)),
+      round: 1,
+    }
+
+    const computedWinner = determineWinner(updatedState.players)
+    if (computedWinner) {
+      setWinner(computedWinner)
+      setGameOver(true)
+      setGameState({ ...updatedState, phase: "results" })
+    } else {
+      setGameState(updatedState)
+    }
   }
 
   const startNewGame = () => {
-    const newGameState = gameLogic.generateGameData(players, includeMisterWhite, useCustomWords, maxRounds)
+    const newGameState = gameLogic.generateGameData(players, {
+      includeMisterWhite,
+      optionalRoles,
+      useCustomWords,
+      maxRounds,
+    })
+
     setGameState(newGameState)
     setCurrentPlayerIndex(0)
     setShowWord(false)
     setEliminatedPlayer(null)
-    setMisterWhiteGuessing(false)
     setGameOver(false)
     setWinner(null)
   }
@@ -209,9 +427,9 @@ export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, 
       <div className="w-full bg-game p-4 rounded-lg">
         <Card className="w-full bg-slate-900/70 backdrop-blur-sm card-neon">
           <CardHeader>
-            <CardTitle className="text-center text-cyan-300">Distribution des mots</CardTitle>
+            <CardTitle className="text-center text-cyan-300">Distribution des rôles</CardTitle>
             <CardDescription className="text-center text-cyan-100">
-              Passez le téléphone à chaque joueur pour qu'il découvre son mot
+              Passez le téléphone à chaque joueur pour découvrir son rôle
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -219,16 +437,11 @@ export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, 
               <div className="text-center p-6">
                 <h3 className="text-xl font-bold mb-4 text-cyan-200">Au tour de {currentPlayer.name}</h3>
                 <p className="mb-6 text-cyan-100">Passez le téléphone à {currentPlayer.name}</p>
-                <WordReveal
-                  player={currentPlayer}
-                  civilianWord={gameState.civilianWord}
-                  undercoverWord={gameState.undercoverWord}
-                  onComplete={handleWordRevealComplete}
-                />
+                <WordReveal player={currentPlayer} onComplete={handleWordRevealComplete} />
               </div>
             ) : (
               <div className="text-center p-6">
-                <h3 className="text-xl font-bold mb-4 text-cyan-200">Mémorisez votre mot !</h3>
+                <h3 className="text-xl font-bold mb-4 text-cyan-200">Mémorisez votre rôle</h3>
                 <p className="mb-6 text-cyan-100">Passez le téléphone au joueur suivant quand vous êtes prêt.</p>
               </div>
             )}
@@ -248,16 +461,22 @@ export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, 
   }
 
   if (gameState.phase === "turn") {
-    const currentTurnPlayer = gameState.players[gameState.turnOrder[gameState.currentTurn]]
+    const currentTurnPlayerIndex = gameState.turnOrder[gameState.currentTurn]
+    const currentTurnPlayer = gameState.players[currentTurnPlayerIndex]
 
     return (
       <div className="w-full bg-game p-4 rounded-lg">
         <TurnPhase
           player={currentTurnPlayer}
+          playerIndex={currentTurnPlayerIndex}
           round={gameState.round}
-          maxRounds={gameState.maxRounds}
-          onClueSubmitted={handleClueSubmitted}
           players={gameState.players}
+          investigations={gameState.investigations}
+          secretMessages={gameState.secretMessages}
+          onClueSubmitted={handleClueSubmitted}
+          onAcknowledgeMessages={handleAcknowledgeMessages}
+          onDetectiveReveal={handleDetectiveReveal}
+          onSpyMessage={handleSpyMessage}
         />
       </div>
     )
@@ -267,7 +486,7 @@ export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, 
     return (
       <div className="w-full bg-game p-4 rounded-lg">
         <VotePhase
-          players={gameState.players.filter((p) => !p.eliminated)}
+          players={gameState.players.filter((player) => !player.eliminated)}
           onVoteComplete={handleVoteComplete}
           eliminatedPlayer={eliminatedPlayer}
         />
@@ -275,11 +494,22 @@ export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, 
     )
   }
 
-  if (gameState.phase === "mister-white-guess") {
+  if (gameState.phase === "thief-choice" && gameState.pendingThief && eliminatedPlayer) {
+    const thief = gameState.players[gameState.pendingThief.thiefIndex]
+    const eliminated = eliminatedPlayer
+
+    return (
+      <div className="w-full bg-game p-4 rounded-lg">
+        <ThiefPhase thief={thief} eliminated={eliminated} onSteal={() => handleThiefDecision(true)} onSkip={() => handleThiefDecision(false)} />
+      </div>
+    )
+  }
+
+  if (gameState.phase === "mister-white-guess" && eliminatedPlayer) {
     return (
       <div className="w-full bg-game p-4 rounded-lg">
         <MisterWhiteGuess
-          player={eliminatedPlayer!}
+          player={eliminatedPlayer}
           civilianWord={gameState.civilianWord}
           onGuessComplete={handleMisterWhiteGuess}
         />
@@ -289,3 +519,4 @@ export const GamePlay = ({ players, includeMisterWhite, useCustomWords = false, 
 
   return <div>État de jeu inconnu</div>
 }
+
